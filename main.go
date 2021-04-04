@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/aws/aws-lambda-go/events"
-	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/request"
@@ -18,7 +21,9 @@ import (
 var sess *session.Session
 
 // Basic information for the Amazon Elasticsearch Service domain
-var endpoint = "https://search-cupcake-domain-001-bdj74ottahj7ttzw3szp4e6tea.ap-south-1.es.amazonaws.com"
+var domain = "https://search-cupcake-domain-001-bdj74ottahj7ttzw3szp4e6tea.ap-south-1.es.amazonaws.com"
+var index = "cupcake-index-001"
+var endpoint = domain + "/" + index + "/" + "_doc" + "/"
 var region = "ap-south-1" // e.g. us-east-1
 var service = "es"
 var signer *v4.Signer
@@ -55,25 +60,91 @@ func configureAWS() *session.Session {
 }
 
 func handleRequest(ctx context.Context, e events.DynamoDBEvent) {
+
+	maps := make([]map[string]string, 0)
+
 	for _, record := range e.Records {
 		fmt.Printf("Processing request data for event ID %s, type %s.\n", record.EventID, record.EventName)
 		fmt.Printf("Change occured: %s", record.Change)
 
+		attrValMap := make(map[string]string)
+
 		// Print new values for attributes of type String
 		for name, value := range record.Change.NewImage {
-			if value.DataType() == events.DataTypeString {
+			if value.DataType() == events.DataTypeString || value.DataType() == events.DataTypeNumber {
 				fmt.Printf("Attribute name: %s, value: %s\n", name, value.String())
+				attrValMap[name] = value.String()
 			}
 		}
+		attrValMap["evtType"] = record.EventName
+		maps = append(maps, attrValMap)
 	}
 
-	req, err := http.NewRequest(http.MethodPut, endpoint, body)
+	for _, map1 := range maps {
+		jsonBody, err := json.Marshal(map1)
+		body := strings.NewReader(string(jsonBody))
+
+		fmt.Println(string(jsonBody))
+
+		if err != nil {
+			fmt.Println(err)
+		}
+
+		req, err := http.NewRequest(http.MethodPost, endpoint, body)
+		if err != nil {
+			fmt.Print(err)
+		}
+
+		req.Header.Add("Content-Type", "application/json")
+
+		signer.Sign(req, body, service, region, time.Now())
+		resp, err := client.Do(req)
+
+		if err != nil {
+			fmt.Print(err)
+		}
+
+		bodyBytes, _ := ioutil.ReadAll(resp.Body)
+
+		fmt.Println(string(bodyBytes))
+	}
+}
+
+func testElasticSearch() {
+	jsonBody := `{
+		"size": 10,
+		"sort": { "last_update": "desc", "Month": "asc"},
+		"query": {
+		   "match_all": {}
+		}
+	 }`
+	body := strings.NewReader(jsonBody)
+
+	fmt.Println(string(jsonBody))
+
+	req, err := http.NewRequest(http.MethodPost, domain+"/"+index+"/"+"_search", body)
 	if err != nil {
 		fmt.Print(err)
 	}
 
+	req.Header.Add("Content-Type", "application/json")
+
+	signer.Sign(req, body, service, region, time.Now())
+	resp, err := client.Do(req)
+
+	if err != nil {
+		fmt.Print(err)
+	}
+
+	bodyBytes, _ := ioutil.ReadAll(resp.Body)
+
+	fmt.Println(string(bodyBytes))
 }
 
 func main() {
-	lambda.Start(handleRequest)
+	// lambda.Start(handleRequest)
+
+	sess = configureAWS()
+	signer = v4.NewSigner(sess.Config.Credentials)
+	testElasticSearch()
 }
